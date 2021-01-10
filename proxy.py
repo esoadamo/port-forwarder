@@ -4,6 +4,7 @@ from collections import namedtuple, deque
 from select import select
 from socket import socket, AF_INET, SOCK_STREAM, SOCK_DGRAM, getdefaulttimeout
 from typing import List, Tuple, Set, Optional, Union
+from threading import Thread, Lock
 
 
 PROXY_INFO = namedtuple('ProxyInfo', ['host', 'port', 'tcp'])
@@ -15,6 +16,8 @@ class ProxySocket(socket):
         super().__init__(*args, **kwargs)
         self.is_server: bool = False
         self.proxy_to: Optional[Union[PROXY_INFO, "ProxySocket"]] = None
+        self.read_cache_lock = Lock()
+        self.read_cache: deque[bytes] = deque()
         self.write_cache: deque[bytes] = deque()
 
     def accept(self) -> "ProxySocket":
@@ -70,15 +73,23 @@ def run_proxy(pairs: List[PROXY_PAIR], uid: Optional[int] = None, guid: Optional
         for reader in readers:
             if reader.is_server:
                 new_client = reader.accept()
-                try:
-                    new_client.proxy_to = create_client_connection(new_client, reader.proxy_to)
-                    to_add = [new_client, new_client.proxy_to]
-                    all_readers.extend(to_add)
-                    all_writers.extend(to_add)
-                    del to_add
-                except ConnectionError:
-                    new_client.close()
-                del new_client
+                all_writers.append(new_client)
+                all_readers.append(new_client)
+                proxy_info = reader.proxy_to
+
+                def f():
+                    try:
+                        proxy_to = create_client_connection(new_client, proxy_info)
+                        with new_client.read_cache_lock:
+                            proxy_to.write_cache.extend(new_client.read_cache)
+                            new_client.proxy_to = proxy_to
+                        new_client.read_cache.clear()
+                        all_readers.append(proxy_to)
+                        all_writers.append(proxy_to)
+                    except ConnectionError:
+                        new_client.close()
+
+                Thread(target=f).start()
             else:
                 try:
                     data = reader.recv(4096)
@@ -92,8 +103,14 @@ def run_proxy(pairs: List[PROXY_PAIR], uid: Optional[int] = None, guid: Optional
                         pass
                     dead_sockets.add(reader.proxy_to)
                 else:
-                    reader.proxy_to.write_cache.append(data)
-                del data
+                    if reader.proxy_to is not None:
+                        reader.proxy_to.write_cache.append(data)
+                    else:
+                        with reader.read_cache_lock:
+                            if reader.proxy_to is not None:
+                                reader.proxy_to.write_cache.append(data)
+                            else:
+                                reader.read_cache.append(data)
         for writer in writers:
             if len(writer.write_cache):
                 write_bytes = writer.write_cache.popleft()
@@ -102,7 +119,6 @@ def run_proxy(pairs: List[PROXY_PAIR], uid: Optional[int] = None, guid: Optional
                     if sent_count < len(write_bytes):
                         write_bytes = write_bytes[sent_count:]
                         writer.write_cache.appendleft(write_bytes)
-                    del sent_count
                 except ConnectionError:
                     dead_sockets.add(writer)
                     try:
@@ -110,7 +126,6 @@ def run_proxy(pairs: List[PROXY_PAIR], uid: Optional[int] = None, guid: Optional
                     except OSError:
                         pass
                     dead_sockets.add(writer.proxy_to)
-                del write_bytes
         for dead in dead_sockets:
             try:
                 all_writers.remove(dead)
