@@ -77,6 +77,8 @@ def run_proxy(pairs: List[PROXY_PAIR]) -> None:
                 data = reader.recv(4096)
                 if not data:
                     dead_sockets.add(reader)
+                    reader.proxy_to.close()
+                    dead_sockets.add(reader.proxy_to)
                 else:
                     reader.proxy_to.write_cache.append(data)
                 del data
