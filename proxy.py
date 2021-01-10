@@ -1,8 +1,12 @@
 import argparse
+import grp
+import pwd
 from collections import namedtuple, deque
 from select import select
 from socket import socket, AF_INET, SOCK_STREAM, SOCK_DGRAM, getdefaulttimeout
 from typing import List, Tuple, Set, Optional, Union
+from os import setuid, setgid
+
 
 PROXY_INFO = namedtuple('ProxyInfo', ['host', 'port', 'tcp'])
 PROXY_PAIR = Tuple[PROXY_INFO, PROXY_INFO]  # from, to
@@ -50,8 +54,10 @@ def create_client_connection(source: ProxySocket, target: PROXY_INFO) -> ProxySo
     return s
 
 
-def run_proxy(pairs: List[PROXY_PAIR]) -> None:
+def run_proxy(pairs: List[PROXY_PAIR], uid: Optional[int] = None, guid: Optional[int] = None) -> None:
     servers = create_proxy_servers(pairs)
+    setgid(guid)
+    setuid(uid)
 
     all_readers = servers[:]
     all_writers = []
@@ -101,13 +107,23 @@ def main():
     parser.add_argument('local_port', metavar='localPort', type=int, help='a port to bind')
     parser.add_argument('remote_ip', metavar='remoteIP', type=str, help='an IP address to proxy to')
     parser.add_argument('remote_port', metavar='remotePort', type=int, help='a port to proxy to')
+    parser.add_argument('--user', metavar='user', type=str, help='change uid to user', default='')
+    parser.add_argument('--group', metavar='group', type=str, help='change guid to user', default='')
     parser.add_argument('--udp', dest='udp', action='store_const', const=True, default=False,
                         help='use UDP instead of TCP')
     args = parser.parse_args()
+
+    uid: Optional[int] = None
+    guid: Optional[int] = None
+    if args.user:
+        uid = pwd.getpwnam(args.user).pw_uid
+    if args.group:
+        guid = grp.getgrnam(args.group).gr_gid
+
     run_proxy([(
-        PROXY_INFO(host=args.local_ip, port=args.local_port, tcp=True),
-        PROXY_INFO(host=args.remote_ip, port=args.remote_port, tcp=True)
-    )])
+        PROXY_INFO(host=args.local_ip, port=args.local_port, tcp=not args.udp),
+        PROXY_INFO(host=args.remote_ip, port=args.remote_port, tcp=not args.udp)
+    )], uid, guid)
 
 
 if __name__ == '__main__':
