@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 import argparse
-import grp
-import pwd
 from collections import namedtuple, deque
 from select import select
 from socket import socket, AF_INET, SOCK_STREAM, SOCK_DGRAM, getdefaulttimeout
 from typing import List, Tuple, Set, Optional, Union
-from os import setuid, setgid
 
 
 PROXY_INFO = namedtuple('ProxyInfo', ['host', 'port', 'tcp'])
@@ -57,8 +54,10 @@ def create_client_connection(source: ProxySocket, target: PROXY_INFO) -> ProxySo
 
 def run_proxy(pairs: List[PROXY_PAIR], uid: Optional[int] = None, guid: Optional[int] = None) -> None:
     servers = create_proxy_servers(pairs)
-    setgid(guid)
-    setuid(uid)
+    if guid is not None or uid is not None:
+        from os import setuid, setgid
+        setgid(guid)
+        setuid(uid)
 
     all_readers = servers[:]
     all_writers = []
@@ -81,7 +80,10 @@ def run_proxy(pairs: List[PROXY_PAIR], uid: Optional[int] = None, guid: Optional
                     new_client.close()
                 del new_client
             else:
-                data = reader.recv(4096)
+                try:
+                    data = reader.recv(4096)
+                except ConnectionError:
+                    data = bytes(0)
                 if not data:
                     dead_sockets.add(reader)
                     reader.proxy_to.close()
@@ -92,17 +94,22 @@ def run_proxy(pairs: List[PROXY_PAIR], uid: Optional[int] = None, guid: Optional
         for writer in writers:
             if len(writer.write_cache):
                 write_bytes = writer.write_cache.popleft()
-                sent_count = writer.send(write_bytes)
-                if sent_count < len(write_bytes):
-                    write_bytes = write_bytes[sent_count:]
-                    writer.write_cache.appendleft(write_bytes)
+                try:
+                    sent_count = writer.send(write_bytes)
+                    if sent_count < len(write_bytes):
+                        write_bytes = write_bytes[sent_count:]
+                        writer.write_cache.appendleft(write_bytes)
+                except ConnectionError:
+                    dead_sockets.add(writer)
+                    writer.proxy_to.close()
+                    dead_sockets.add(writer.proxy_to)
                 del write_bytes, sent_count
         for dead in dead_sockets:
             all_writers.remove(dead)
             all_readers.remove(dead)
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description='Runs a proxy from point A to point B')
     parser.add_argument('local_ip', metavar='localIP', type=str, help='an IP address to bind')
     parser.add_argument('local_port', metavar='localPort', type=int, help='a port to bind')
@@ -116,16 +123,26 @@ def main():
 
     uid: Optional[int] = None
     guid: Optional[int] = None
-    if args.user:
-        uid = pwd.getpwnam(args.user).pw_uid
-    if args.group:
-        guid = grp.getgrnam(args.group).gr_gid
+    if args.user or args.group:
+        try:
+            # noinspection PyUnresolvedReferences
+            import grp
+            # noinspection PyUnresolvedReferences
+            import pwd
+            if args.user:
+                uid = pwd.getpwnam(args.user).pw_uid
+            if args.group:
+                guid = grp.getgrnam(args.group).gr_gid
+        except ModuleNotFoundError:
+            print("Cannot determine user's UID / GUID")
+            return 1
 
     run_proxy([(
         PROXY_INFO(host=args.local_ip, port=args.local_port, tcp=not args.udp),
         PROXY_INFO(host=args.remote_ip, port=args.remote_port, tcp=not args.udp)
     )], uid, guid)
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    exit(main())
