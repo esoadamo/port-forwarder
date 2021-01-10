@@ -64,11 +64,15 @@ def run_proxy(pairs: List[PROXY_PAIR]) -> None:
         for reader in readers:
             if reader.is_server:
                 new_client = reader.accept()
-                new_client.proxy_to = create_client_connection(new_client, reader.proxy_to)
-                to_add = [new_client, new_client.proxy_to]
-                all_readers.extend(to_add)
-                all_writers.extend(to_add)
-                del new_client, to_add
+                try:
+                    new_client.proxy_to = create_client_connection(new_client, reader.proxy_to)
+                    to_add = [new_client, new_client.proxy_to]
+                    all_readers.extend(to_add)
+                    all_writers.extend(to_add)
+                    del to_add
+                except ConnectionRefusedError:
+                    new_client.close()
+                del new_client
             else:
                 data = reader.recv(4096)
                 if not data:
