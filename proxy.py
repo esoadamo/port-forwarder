@@ -6,6 +6,8 @@ from socket import socket, AF_INET, SOCK_STREAM, SOCK_DGRAM, getdefaulttimeout
 from typing import List, Tuple, Set, Optional, Union
 from threading import Thread, Lock
 
+CHUNK_SIZE_B = 4096  # B
+MAX_MEMORY_B = 16*(1024**2)  # 16MiB
 
 PROXY_INFO = namedtuple('ProxyInfo', ['host', 'port', 'tcp'])
 PROXY_PAIR = Tuple[PROXY_INFO, PROXY_INFO]  # from, to
@@ -27,6 +29,9 @@ class ProxySocket(socket):
         if getdefaulttimeout() is None and self.gettimeout():
             sock.setblocking(True)
         return sock
+
+    def memory_usage(self) -> int:
+        return sum(map(lambda x: len(x), self.read_cache)) + sum(map(lambda x: len(x), self.write_cache))
 
 
 def create_socket_server(info: PROXY_INFO) -> ProxySocket:
@@ -64,54 +69,64 @@ def run_proxy(pairs: List[PROXY_PAIR], uid: Optional[int] = None, guid: Optional
 
     all_readers = servers[:]
     all_writers = []
+    memory_usage = 0
 
     while True:
         readers, writers, _ = select(all_readers, all_writers,
                                      [])  # type: List[ProxySocket], List[ProxySocket], List[None]
         dead_sockets: Set[ProxySocket] = set()
 
-        for reader in readers:
-            if reader.is_server:
-                new_client = reader.accept()
-                all_writers.append(new_client)
-                all_readers.append(new_client)
-                proxy_info = reader.proxy_to
+        if memory_usage < MAX_MEMORY_B:
+            for reader in readers:
+                if reader in dead_sockets:
+                    continue
+                if reader.is_server:
+                    new_client = reader.accept()
+                    all_writers.append(new_client)
+                    all_readers.append(new_client)
+                    proxy_info = reader.proxy_to
 
-                def f():
-                    try:
-                        proxy_to = create_client_connection(new_client, proxy_info)
-                        with new_client.read_cache_lock:
-                            proxy_to.write_cache.extend(new_client.read_cache)
-                            new_client.proxy_to = proxy_to
-                        new_client.read_cache.clear()
-                        all_readers.append(proxy_to)
-                        all_writers.append(proxy_to)
-                    except ConnectionError:
-                        new_client.close()
+                    def f():
+                        try:
+                            proxy_to = create_client_connection(new_client, proxy_info)
+                            with new_client.read_cache_lock:
+                                proxy_to.write_cache.extend(new_client.read_cache)
+                                new_client.proxy_to = proxy_to
+                            new_client.read_cache.clear()
+                            all_readers.append(proxy_to)
+                            all_writers.append(proxy_to)
+                        except ConnectionError:
+                            new_client.close()
 
-                Thread(target=f).start()
-            else:
-                try:
-                    data = reader.recv(4096)
-                except ConnectionError:
-                    data = bytes(0)
-                if not data:
-                    dead_sockets.add(reader)
-                    try:
-                        reader.proxy_to.close()
-                    except OSError:
-                        pass
-                    dead_sockets.add(reader.proxy_to)
+                    Thread(target=f).start()
                 else:
-                    if reader.proxy_to is not None:
-                        reader.proxy_to.write_cache.append(data)
+                    try:
+                        data = reader.recv(CHUNK_SIZE_B)
+                        memory_usage += len(data)
+                    except ConnectionError:
+                        data = bytes(0)
+                    if not data:
+                        dead_sockets.add(reader)
+                        memory_usage -= reader.memory_usage()
+                        try:
+                            reader.proxy_to.close()
+                        except OSError:
+                            pass
+                        dead_sockets.add(reader.proxy_to)
+                        memory_usage -= reader.proxy_to.memory_usage()
                     else:
-                        with reader.read_cache_lock:
-                            if reader.proxy_to is not None:
-                                reader.proxy_to.write_cache.append(data)
-                            else:
-                                reader.read_cache.append(data)
+                        if reader.proxy_to is not None:
+                            reader.proxy_to.write_cache.append(data)
+                        else:
+                            with reader.read_cache_lock:
+                                if reader.proxy_to is not None:
+                                    reader.proxy_to.write_cache.append(data)
+                                else:
+                                    reader.read_cache.append(data)
+
         for writer in writers:
+            if writer in dead_sockets:
+                continue
             if len(writer.write_cache):
                 write_bytes = writer.write_cache.popleft()
                 try:
@@ -119,13 +134,17 @@ def run_proxy(pairs: List[PROXY_PAIR], uid: Optional[int] = None, guid: Optional
                     if sent_count < len(write_bytes):
                         write_bytes = write_bytes[sent_count:]
                         writer.write_cache.appendleft(write_bytes)
+                    memory_usage -= sent_count
                 except ConnectionError:
                     dead_sockets.add(writer)
+                    memory_usage -= writer.memory_usage()
                     try:
                         writer.proxy_to.close()
                     except OSError:
                         pass
                     dead_sockets.add(writer.proxy_to)
+                    memory_usage -= writer.proxy_to.memory_usage()
+
         for dead in dead_sockets:
             try:
                 all_writers.remove(dead)
