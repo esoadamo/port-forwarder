@@ -76,7 +76,7 @@ def run_proxy(pairs: List[PROXY_PAIR], uid: Optional[int] = None, guid: Optional
                     all_readers.extend(to_add)
                     all_writers.extend(to_add)
                     del to_add
-                except ConnectionRefusedError:
+                except ConnectionError:
                     new_client.close()
                 del new_client
             else:
@@ -86,7 +86,10 @@ def run_proxy(pairs: List[PROXY_PAIR], uid: Optional[int] = None, guid: Optional
                     data = bytes(0)
                 if not data:
                     dead_sockets.add(reader)
-                    reader.proxy_to.close()
+                    try:
+                        reader.proxy_to.close()
+                    except OSError:
+                        pass
                     dead_sockets.add(reader.proxy_to)
                 else:
                     reader.proxy_to.write_cache.append(data)
@@ -99,14 +102,24 @@ def run_proxy(pairs: List[PROXY_PAIR], uid: Optional[int] = None, guid: Optional
                     if sent_count < len(write_bytes):
                         write_bytes = write_bytes[sent_count:]
                         writer.write_cache.appendleft(write_bytes)
+                    del sent_count
                 except ConnectionError:
                     dead_sockets.add(writer)
-                    writer.proxy_to.close()
+                    try:
+                        writer.proxy_to.close()
+                    except OSError:
+                        pass
                     dead_sockets.add(writer.proxy_to)
-                del write_bytes, sent_count
+                del write_bytes
         for dead in dead_sockets:
-            all_writers.remove(dead)
-            all_readers.remove(dead)
+            try:
+                all_writers.remove(dead)
+            except ValueError:
+                pass
+            try:
+                all_readers.remove(dead)
+            except ValueError:
+                pass
 
 
 def main() -> int:
