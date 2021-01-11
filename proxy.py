@@ -98,7 +98,7 @@ def run_proxy(pairs: List[PROXY_PAIR], uid: Optional[int] = None, guid: Optional
                         except ConnectionError:
                             new_client.close()
 
-                    Thread(target=f).start()
+                    Thread(target=f, daemon=True).start()
                 else:
                     try:
                         data = reader.recv(CHUNK_SIZE_B)
