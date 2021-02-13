@@ -70,6 +70,14 @@ def run_proxy(pairs: List[PROXY_PAIR], uid: Optional[int] = None, guid: Optional
         setgid(guid)
         setuid(uid)
 
+    try:
+        __run_proxy_loop(servers)
+    finally:
+        print('stopping servers')
+        [s.close() for s in servers]
+
+
+def __run_proxy_loop(servers: List[ProxySocket]) -> None:
     all_readers: List[ProxySocket] = servers[:]
     all_writers: List[ProxySocket] = []
     memory_usage = 0
