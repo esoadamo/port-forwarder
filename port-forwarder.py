@@ -3,8 +3,8 @@ import argparse
 from collections import namedtuple, deque
 from select import select
 from socket import socket, AF_INET, SOCK_STREAM, SOCK_DGRAM, getdefaulttimeout
-from typing import List, Tuple, Set, Optional, Union
 from threading import Thread, Lock
+from typing import List, Tuple, Set, Optional, Union
 
 CHUNK_SIZE_B = 4096  # B
 MAX_MEMORY_B = 16*(1024**2)  # 16MiB
@@ -70,13 +70,14 @@ def run_proxy(pairs: List[PROXY_PAIR], uid: Optional[int] = None, guid: Optional
         setgid(guid)
         setuid(uid)
 
-    all_readers = servers[:]
-    all_writers = []
+    all_readers: List[ProxySocket] = servers[:]
+    all_writers: List[ProxySocket] = []
     memory_usage = 0
 
     while True:
         possible_readers = all_readers if memory_usage < MAX_MEMORY_B else []
-        readers, writers, _ = select(possible_readers, all_writers,
+        possible_writes = filter(lambda x: x.write_cache, all_writers)
+        readers, writers, _ = select(possible_readers, possible_writes,
                                      [])  # type: List[ProxySocket], List[ProxySocket], List[None]
         dead_sockets: Set[ProxySocket] = set()
 
