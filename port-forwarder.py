@@ -104,9 +104,7 @@ def run_proxy(pairs: List[PROXY_PAIR], uid: Optional[int] = None, guid: Optional
 
                         Thread(target=f, daemon=True).start()
                     else:
-                        def f():
-                            message, address = reader.recvfrom(CHUNK_SIZE_B)
-                            reader.proxy_to.sendto()
+                        raise NotImplementedError("UDP not yet implemented")
                 else:
                     try:
                         data = reader.recv(CHUNK_SIZE_B)
