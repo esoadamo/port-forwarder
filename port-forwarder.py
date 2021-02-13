@@ -75,60 +75,60 @@ def run_proxy(pairs: List[PROXY_PAIR], uid: Optional[int] = None, guid: Optional
     memory_usage = 0
 
     while True:
-        readers, writers, _ = select(all_readers, all_writers,
+        possible_readers = all_readers if memory_usage < MAX_MEMORY_B else []
+        readers, writers, _ = select(possible_readers, all_writers,
                                      [])  # type: List[ProxySocket], List[ProxySocket], List[None]
         dead_sockets: Set[ProxySocket] = set()
 
-        if memory_usage < MAX_MEMORY_B:
-            for reader in readers:
-                if reader in dead_sockets:
-                    continue
-                if reader.is_server:
-                    if reader.info.tcp:
-                        new_client = reader.accept()
-                        all_writers.append(new_client)
-                        all_readers.append(new_client)
-                        proxy_info = reader.proxy_to
+        for reader in readers:
+            if reader in dead_sockets:
+                continue
+            if reader.is_server:
+                if reader.info.tcp:
+                    new_client = reader.accept()
+                    all_writers.append(new_client)
+                    all_readers.append(new_client)
+                    proxy_info = reader.proxy_to
 
-                        def f():
-                            try:
-                                proxy_to = create_client_connection(new_client, proxy_info)
-                                with new_client.read_cache_lock:
-                                    proxy_to.write_cache.extend(new_client.read_cache)
-                                    new_client.proxy_to = proxy_to
-                                new_client.read_cache.clear()
-                                all_readers.append(proxy_to)
-                                all_writers.append(proxy_to)
-                            except ConnectionError:
-                                new_client.close()
-
-                        Thread(target=f, daemon=True).start()
-                    else:
-                        raise NotImplementedError("UDP not yet implemented")
-                else:
-                    try:
-                        data = reader.recv(CHUNK_SIZE_B)
-                        memory_usage += len(data)
-                    except ConnectionError:
-                        data = bytes(0)
-                    if not data:
-                        dead_sockets.add(reader)
-                        memory_usage -= reader.memory_usage()
+                    def f():
                         try:
-                            reader.proxy_to.close()
-                        except OSError:
-                            pass
-                        dead_sockets.add(reader.proxy_to)
-                        memory_usage -= reader.proxy_to.memory_usage()
+                            proxy_to = create_client_connection(new_client, proxy_info)
+                            with new_client.read_cache_lock:
+                                proxy_to.write_cache.extend(new_client.read_cache)
+                                new_client.proxy_to = proxy_to
+                            new_client.read_cache.clear()
+                            all_readers.append(proxy_to)
+                            all_writers.append(proxy_to)
+                        except ConnectionError:
+                            new_client.close()
+
+                    Thread(target=f, daemon=True).start()
+                else:
+                    raise NotImplementedError("UDP not yet implemented")
+            else:
+                try:
+                    data = reader.recv(CHUNK_SIZE_B)
+                    memory_usage += len(data)
+                except ConnectionError:
+                    data = bytes(0)
+                if not data:
+                    dead_sockets.add(reader)
+                    memory_usage -= reader.memory_usage()
+                    try:
+                        reader.proxy_to.close()
+                    except OSError:
+                        pass
+                    dead_sockets.add(reader.proxy_to)
+                    memory_usage -= reader.proxy_to.memory_usage()
+                else:
+                    if reader.proxy_to is not None:
+                        reader.proxy_to.write_cache.append(data)
                     else:
-                        if reader.proxy_to is not None:
-                            reader.proxy_to.write_cache.append(data)
-                        else:
-                            with reader.read_cache_lock:
-                                if reader.proxy_to is not None:
-                                    reader.proxy_to.write_cache.append(data)
-                                else:
-                                    reader.read_cache.append(data)
+                        with reader.read_cache_lock:
+                            if reader.proxy_to is not None:
+                                reader.proxy_to.write_cache.append(data)
+                            else:
+                                reader.read_cache.append(data)
 
         for writer in writers:
             if writer in dead_sockets:
