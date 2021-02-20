@@ -12,7 +12,8 @@ from typing import List, Tuple, Set, Optional, Union, Dict
 
 CHUNK_SIZE_B = 4096  # B
 MAX_MEMORY_B = 16*(1024**2)  # 16MiB
-SOCKET_IDLE_TIMEOUT = 120  # s
+SOCKET_IDLE_TIMEOUT = 120  # s, 0 to disabled
+SOCKET_IDLE_TCP_TIMEOUT_ENABLED = False
 
 PROXY_INFO = namedtuple('ProxyInfo', ['host', 'port', 'tcp'])
 PROXY_PAIR = Tuple[PROXY_INFO, PROXY_INFO]  # from, to
@@ -116,13 +117,15 @@ def __run_proxy_loop(servers: List[ProxySocket]) -> None:
     while True:
         dead_sockets: Set[ProxySocket] = set()
 
-        if time.time() - last_time_inactive_removed > min(180, SOCKET_IDLE_TIMEOUT):
+        if SOCKET_IDLE_TIMEOUT and time.time() - last_time_inactive_removed > min(180, SOCKET_IDLE_TIMEOUT):
+            last_time_inactive_removed = time.time()
             logging.debug('[MEM] removing inactive sockets')
-            for s in all_readers:
+            sockets = all_readers if SOCKET_IDLE_TCP_TIMEOUT_ENABLED else udp_sockets.values()
+            for s in sockets:
                 if type(s) is int or s.is_server or time.time() - s.last_used < SOCKET_IDLE_TIMEOUT:
                     continue
                 dead_sockets.add(s)
-                if isinstance(s.proxy_to, socket):
+                if isinstance(s.proxy_to, ProxySocket):
                     dead_sockets.add(s)
 
         memory_usage = data_memory_usage + len(all_readers) * 1360
@@ -270,7 +273,7 @@ def __run_proxy_loop(servers: List[ProxySocket]) -> None:
 
 
 def main() -> int:
-    logging.basicConfig(level=logging.DEBUG)
+    logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser(description='Runs a proxy from point A to point B')
     parser.add_argument('local_ip', metavar='localIP', type=str, help='an IP address to bind')
     parser.add_argument('local_port', metavar='localPort', type=int, help='a port to bind')
