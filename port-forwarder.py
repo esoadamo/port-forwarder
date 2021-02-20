@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import logging
 from collections import namedtuple, deque
 from select import select
 from socket import socket, AF_INET, SOCK_STREAM, SOCK_DGRAM, getdefaulttimeout
@@ -84,9 +85,12 @@ def __run_proxy_loop(servers: List[ProxySocket]) -> None:
 
     while True:
         possible_readers = all_readers if memory_usage < MAX_MEMORY_B else []
-        possible_writes = filter(lambda x: x.write_cache, all_writers)
+        logging.debug(f'[MEM] {memory_usage // 1024} / {MAX_MEMORY_B // 1024} kiB used')
+        possible_writes = list(filter(lambda x: x.write_cache, all_writers))
+        logging.debug(f'[LOOP] possible readers {len(possible_readers)}, writers {len(possible_writes)}')
         readers, writers, _ = select(possible_readers, possible_writes,
-                                     [])  # type: List[ProxySocket], List[ProxySocket], List[None]
+                                     [], 0.5)  # type: List[ProxySocket], List[ProxySocket], List[None]
+        logging.debug(f'[LOOP] selected readers {len(readers)}, writers {len(writers)}')
         dead_sockets: Set[ProxySocket] = set()
 
         for reader in readers:
@@ -94,14 +98,17 @@ def __run_proxy_loop(servers: List[ProxySocket]) -> None:
                 continue
             if reader.is_server:
                 if reader.info.tcp:
+                    logging.debug(f'[ACC] accepting new client to {reader.info}')
                     new_client = reader.accept()
                     all_writers.append(new_client)
                     all_readers.append(new_client)
                     proxy_info = reader.proxy_to
+                    logging.debug(f'[ACC] new client accepted: {new_client.fileno()}')
 
                     def f():
                         try:
                             proxy_to = create_client_connection(new_client, proxy_info)
+                            logging.debug(f'[C] {new_client.fileno()}: peer connection created')
                             with new_client.read_cache_lock:
                                 proxy_to.write_cache.extend(new_client.read_cache)
                                 new_client.proxy_to = proxy_to
@@ -172,6 +179,7 @@ def __run_proxy_loop(servers: List[ProxySocket]) -> None:
 
 
 def main() -> int:
+    logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser(description='Runs a proxy from point A to point B')
     parser.add_argument('local_ip', metavar='localIP', type=str, help='an IP address to bind')
     parser.add_argument('local_port', metavar='localPort', type=int, help='a port to bind')
