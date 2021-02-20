@@ -67,10 +67,6 @@ def create_client_connection(source: Union[ProxySocket, PROXY_INFO], target: PRO
     return s
 
 
-def create_local_udp_server() -> ProxySocket:
-    return create_socket_server(PROXY_INFO(host='127.0.0.1', port=0, tcp=False))
-
-
 def run_proxy(pairs: List[PROXY_PAIR], uid: Optional[int] = None, guid: Optional[int] = None) -> None:
     servers = create_proxy_servers(pairs)
     if guid is not None or uid is not None:
@@ -109,9 +105,6 @@ def __run_proxy_loop(servers: List[ProxySocket]) -> None:
         logging.debug(f'[MEM] {memory_usage // 1024} / {MAX_MEMORY_B // 1024} kiB used')
         possible_writes = list(filter(lambda x: x.write_cache, all_writers))
         logging.debug(f'[LOOP] possible readers {len(possible_readers)}, writers {len(possible_writes)}')
-        if logging.root.level == logging.DEBUG:
-            logging.debug(f"[LOOP] readers: {list(map(lambda x: x.fileno(), possible_readers))}")
-            logging.debug(f"[LOOP] writers: {list(map(lambda x: x.fileno(), possible_writes))}")
         readers, writers, err = select(possible_readers, possible_writes,
                                        list(set(possible_writes + possible_readers))
                                        )  # type: List[ProxySocket], List[ProxySocket], List[ProxySocket]
@@ -232,7 +225,7 @@ def __run_proxy_loop(servers: List[ProxySocket]) -> None:
 
 
 def main() -> int:
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.DEBUG)
     parser = argparse.ArgumentParser(description='Runs a proxy from point A to point B')
     parser.add_argument('local_ip', metavar='localIP', type=str, help='an IP address to bind')
     parser.add_argument('local_port', metavar='localPort', type=int, help='a port to bind')
