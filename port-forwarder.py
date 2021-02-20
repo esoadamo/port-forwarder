@@ -106,7 +106,7 @@ def __run_proxy_loop(servers: List[ProxySocket]) -> None:
     last_time_inactive_removed = time.time()
 
     def can_open_more_sockets() -> bool:
-        return max(len(all_readers) + len(servers), len(all_writers)) < 1000
+        return max(len(all_readers) + len(servers), len(all_writers)) < (500 if os_windows else 1000)
 
     def unblock_select_wait() -> None:
         if os_windows:
