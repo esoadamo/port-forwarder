@@ -2,6 +2,7 @@
 import argparse
 import logging
 import os
+import time
 from collections import namedtuple, deque
 from select import select
 from socket import socket, AF_INET, SOCK_STREAM, SOCK_DGRAM, getdefaulttimeout
@@ -10,6 +11,7 @@ from typing import List, Tuple, Set, Optional, Union, Dict
 
 CHUNK_SIZE_B = 4096  # B
 MAX_MEMORY_B = 16*(1024**2)  # 16MiB
+SOCKET_IDLE_TIMEOUT = 120  # s
 
 PROXY_INFO = namedtuple('ProxyInfo', ['host', 'port', 'tcp'])
 PROXY_PAIR = Tuple[PROXY_INFO, PROXY_INFO]  # from, to
@@ -25,6 +27,7 @@ class ProxySocket(socket):
         self.read_cache_lock = Lock()
         self.read_cache: deque[bytes] = deque()
         self.write_cache: deque[bytes] = deque()
+        self.last_used = time.time()
 
     def accept(self) -> "ProxySocket":
         # noinspection PyUnresolvedReferences
@@ -85,8 +88,7 @@ def __run_proxy_loop(servers: List[ProxySocket]) -> None:
     # this server will be notified when a new connection is established in order to unblock select
     pipe_unblock_select_read, pipe_unblock_select_write = os.pipe()
 
-    all_readers: List[ProxyOrPipe] = servers[:]
-    all_readers.append(pipe_unblock_select_read)
+    all_readers: List[ProxyOrPipe] = [pipe_unblock_select_read]
 
     all_writers: List[ProxySocket] = []
 
@@ -94,14 +96,37 @@ def __run_proxy_loop(servers: List[ProxySocket]) -> None:
 
     udp_sockets: Dict[Tuple[str, int], ProxySocket] = {}
 
+    last_time_inactive_removed = time.time()
+
+    def can_open_more_sockets() -> bool:
+        return max(len(all_readers) + len(servers), len(all_writers)) < 1000
+
     def unblock_select_wait() -> None:
         os.write(pipe_unblock_select_write, b'1')
 
     while True:
-        memory_usage = data_memory_usage + len(all_readers) * 1360
         dead_sockets: Set[ProxySocket] = set()
 
-        possible_readers = all_readers if memory_usage < MAX_MEMORY_B else servers
+        if time.time() - last_time_inactive_removed > min(180, SOCKET_IDLE_TIMEOUT):
+            logging.debug('[MEM] removing inactive sockets')
+            for s in all_readers:
+                if type(s) is int or s.is_server or time.time() - s.last_used < SOCKET_IDLE_TIMEOUT:
+                    continue
+                dead_sockets.add(s)
+                if isinstance(s.proxy_to, socket):
+                    dead_sockets.add(s)
+
+        memory_usage = data_memory_usage + len(all_readers) * 1360
+
+        if memory_usage < MAX_MEMORY_B:
+            possible_readers = all_readers
+            if can_open_more_sockets():
+                possible_readers.extend(servers)
+            else:
+                logging.warning("[MEM] To much opened sockets, cannot accept more")
+        else:
+            possible_readers = []
+
         logging.debug(f'[MEM] {memory_usage // 1024} / {MAX_MEMORY_B // 1024} kiB used')
         possible_writes = list(filter(lambda x: x.write_cache, all_writers))
         logging.debug(f'[LOOP] possible readers {len(possible_readers)}, writers {len(possible_writes)}')
@@ -118,6 +143,9 @@ def __run_proxy_loop(servers: List[ProxySocket]) -> None:
                 logging.debug(f'[ACC] unblocking request received')
                 os.read(pipe_unblock_select_read, 1)
             elif reader.is_server:
+                if not can_open_more_sockets():
+                    logging.warning("[ACC] to much opened sockets, rejecting")
+                    continue
                 if reader.info.tcp:
                     logging.debug(f'[ACC] accepting new client to {reader.info}')
                     new_client = reader.accept()
@@ -145,7 +173,10 @@ def __run_proxy_loop(servers: List[ProxySocket]) -> None:
 
                     Thread(target=f, daemon=True).start()
                 else:
-                    data, address = reader.recvfrom(CHUNK_SIZE_B)
+                    try:
+                        data, address = reader.recvfrom(CHUNK_SIZE_B)
+                    except (BlockingIOError, OSError, ConnectionError):
+                        continue
                     target = reader.proxy_to
                     if address not in udp_sockets:
                         soc = create_client_connection(
@@ -156,8 +187,12 @@ def __run_proxy_loop(servers: List[ProxySocket]) -> None:
                         all_readers.append(soc)
                     else:
                         soc = udp_sockets[address]
-                    soc.sendto(data, (target.host, target.port))
+                    try:
+                        soc.sendto(data, (target.host, target.port))
+                    except (OSError, ConnectionError):
+                        dead_sockets.add(soc)
             else:
+                reader.last_used = time.time()
                 try:
                     data = reader.recv(CHUNK_SIZE_B)
                     data_memory_usage += len(data)
@@ -189,6 +224,7 @@ def __run_proxy_loop(servers: List[ProxySocket]) -> None:
         for writer in writers:
             if writer in dead_sockets:
                 continue
+            writer.last_used = time.time()
             if len(writer.write_cache):
                 write_bytes = writer.write_cache.popleft()
                 try:
