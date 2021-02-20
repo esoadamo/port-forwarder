@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import logging
+import os
 from collections import namedtuple, deque
 from select import select
 from socket import socket, AF_INET, SOCK_STREAM, SOCK_DGRAM, getdefaulttimeout
@@ -12,6 +13,7 @@ MAX_MEMORY_B = 16*(1024**2)  # 16MiB
 
 PROXY_INFO = namedtuple('ProxyInfo', ['host', 'port', 'tcp'])
 PROXY_PAIR = Tuple[PROXY_INFO, PROXY_INFO]  # from, to
+ProxyOrPipe = Union["ProxySocket", int]
 
 
 class ProxySocket(socket):
@@ -64,6 +66,10 @@ def create_client_connection(source: ProxySocket, target: PROXY_INFO) -> ProxySo
     return s
 
 
+def create_local_udp_server() -> ProxySocket:
+    return create_socket_server(PROXY_INFO(host='127.0.0.1', port=0, tcp=False))
+
+
 def run_proxy(pairs: List[PROXY_PAIR], uid: Optional[int] = None, guid: Optional[int] = None) -> None:
     servers = create_proxy_servers(pairs)
     if guid is not None or uid is not None:
@@ -79,24 +85,39 @@ def run_proxy(pairs: List[PROXY_PAIR], uid: Optional[int] = None, guid: Optional
 
 
 def __run_proxy_loop(servers: List[ProxySocket]) -> None:
-    all_readers: List[ProxySocket] = servers[:]
+    # this server will be notified when a new connection is established in order to unblock select
+    pipe_unblock_select_read, pipe_unblock_select_write = os.pipe()
+
+    all_readers: List[ProxyOrPipe] = servers[:]
+    all_readers.append(pipe_unblock_select_read)
+
     all_writers: List[ProxySocket] = []
     memory_usage = 0
 
+    def unblock_select_wait() -> None:
+        os.write(pipe_unblock_select_write, b'1')
+
     while True:
-        possible_readers = all_readers if memory_usage < MAX_MEMORY_B else []
+        possible_readers = all_readers if memory_usage < MAX_MEMORY_B else servers
         logging.debug(f'[MEM] {memory_usage // 1024} / {MAX_MEMORY_B // 1024} kiB used')
         possible_writes = list(filter(lambda x: x.write_cache, all_writers))
         logging.debug(f'[LOOP] possible readers {len(possible_readers)}, writers {len(possible_writes)}')
-        readers, writers, _ = select(possible_readers, possible_writes,
-                                     [], 0.5)  # type: List[ProxySocket], List[ProxySocket], List[None]
-        logging.debug(f'[LOOP] selected readers {len(readers)}, writers {len(writers)}')
-        dead_sockets: Set[ProxySocket] = set()
+        if logging.root.level == logging.DEBUG:
+            logging.debug(f"[LOOP] readers: {list(map(lambda x: x.fileno(), possible_readers))}")
+            logging.debug(f"[LOOP] writers: {list(map(lambda x: x.fileno(), possible_writes))}")
+        readers, writers, err = select(possible_readers, possible_writes,
+                                       list(set(possible_writes + possible_readers))
+                                       )  # type: List[ProxySocket], List[ProxySocket], List[ProxySocket]
+        logging.debug(f'[LOOP] selected readers {len(readers)}, writers {len(writers)}, in error {len(err)}')
+        dead_sockets: Set[ProxySocket] = set(err)
 
         for reader in readers:
             if reader in dead_sockets:
                 continue
-            if reader.is_server:
+            if reader == pipe_unblock_select_read:
+                logging.debug(f'[ACC] unblocking request received')
+                os.read(pipe_unblock_select_read, 1)
+            elif reader.is_server:
                 if reader.info.tcp:
                     logging.debug(f'[ACC] accepting new client to {reader.info}')
                     new_client = reader.accept()
@@ -107,14 +128,18 @@ def __run_proxy_loop(servers: List[ProxySocket]) -> None:
 
                     def f():
                         try:
+                            logging.debug(f'[C] {new_client.fileno()}: creating peer connection')
                             proxy_to = create_client_connection(new_client, proxy_info)
-                            logging.debug(f'[C] {new_client.fileno()}: peer connection created')
+                            logging.debug(f'[C] {new_client.fileno()}: peer connection created as {proxy_to.fileno()}')
                             with new_client.read_cache_lock:
                                 proxy_to.write_cache.extend(new_client.read_cache)
                                 new_client.proxy_to = proxy_to
-                            new_client.read_cache.clear()
+                                new_client.read_cache.clear()
+                            logging.debug(f'[C] {new_client.fileno()}: first cache copied to {proxy_to.fileno()}')
                             all_readers.append(proxy_to)
                             all_writers.append(proxy_to)
+
+                            unblock_select_wait()
                         except ConnectionError:
                             new_client.close()
 
