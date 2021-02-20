@@ -3,6 +3,7 @@ import argparse
 import logging
 import os
 import time
+import platform
 from collections import namedtuple, deque
 from select import select
 from socket import socket, AF_INET, SOCK_STREAM, SOCK_DGRAM, getdefaulttimeout
@@ -85,10 +86,15 @@ def run_proxy(pairs: List[PROXY_PAIR], uid: Optional[int] = None, guid: Optional
 
 
 def __run_proxy_loop(servers: List[ProxySocket]) -> None:
+    os_windows = platform.system() == 'Windows'
     # this server will be notified when a new connection is established in order to unblock select
-    pipe_unblock_select_read, pipe_unblock_select_write = os.pipe()
+    if os_windows:
+        pipe_unblock_select_read = create_socket_server(PROXY_INFO(host='127.0.0.1', port=0, tcp=False))
+        pipe_unblock_select_write = socket(AF_INET, SOCK_DGRAM)
+    else:
+        pipe_unblock_select_read, pipe_unblock_select_write = os.pipe()
 
-    all_readers: List[ProxyOrPipe] = [pipe_unblock_select_read]
+    all_readers: List[ProxyOrPipe] = []
 
     all_writers: List[ProxySocket] = []
 
@@ -102,7 +108,10 @@ def __run_proxy_loop(servers: List[ProxySocket]) -> None:
         return max(len(all_readers) + len(servers), len(all_writers)) < 1000
 
     def unblock_select_wait() -> None:
-        os.write(pipe_unblock_select_write, b'1')
+        if os_windows:
+            pipe_unblock_select_write.sendto(b'1', pipe_unblock_select_read.getsockname())
+        else:
+            os.write(pipe_unblock_select_write, b'1')
 
     while True:
         dead_sockets: Set[ProxySocket] = set()
@@ -119,7 +128,7 @@ def __run_proxy_loop(servers: List[ProxySocket]) -> None:
         memory_usage = data_memory_usage + len(all_readers) * 1360
 
         if memory_usage < MAX_MEMORY_B:
-            possible_readers = all_readers
+            possible_readers = all_readers + [pipe_unblock_select_read]
             if can_open_more_sockets():
                 possible_readers.extend(servers)
             else:
@@ -141,18 +150,24 @@ def __run_proxy_loop(servers: List[ProxySocket]) -> None:
                 continue
             if reader == pipe_unblock_select_read:
                 logging.debug(f'[ACC] unblocking request received')
-                os.read(pipe_unblock_select_read, 1)
+                if os_windows:
+                    pipe_unblock_select_read.recvfrom(1)
+                else:
+                    os.read(pipe_unblock_select_read, 1)
             elif reader.is_server:
                 if not can_open_more_sockets():
                     logging.warning("[ACC] to much opened sockets, rejecting")
                     continue
                 if reader.info.tcp:
                     logging.debug(f'[ACC] accepting new client to {reader.info}')
-                    new_client = reader.accept()
+                    try:
+                        new_client = reader.accept()
+                    except (BlockingIOError, ConnectionError, OSError):
+                        continue
                     all_writers.append(new_client)
                     all_readers.append(new_client)
                     proxy_info = reader.proxy_to
-                    logging.debug(f'[ACC] new client accepted: {new_client.fileno()}')
+                    logging.debug(f'[ACC] new client accepted: {new_client.fileno()} {new_client.getpeername()}')
 
                     def f():
                         try:
@@ -189,27 +204,24 @@ def __run_proxy_loop(servers: List[ProxySocket]) -> None:
                         soc = udp_sockets[address]
                     try:
                         soc.sendto(data, (target.host, target.port))
-                    except (OSError, ConnectionError):
+                    except (BlockingIOError, OSError, ConnectionError):
                         dead_sockets.add(soc)
             else:
                 reader.last_used = time.time()
                 try:
                     data = reader.recv(CHUNK_SIZE_B)
                     data_memory_usage += len(data)
-                except ConnectionError:
+                except (BlockingIOError, OSError, ConnectionError):
                     data = bytes(0)
                 if not data:
                     dead_sockets.add(reader)
                     data_memory_usage -= reader.memory_usage()
-                    try:
-                        reader.proxy_to.close()
-                    except OSError:
-                        pass
-                    dead_sockets.add(reader.proxy_to)
-                    data_memory_usage -= reader.proxy_to.memory_usage()
+                    if isinstance(reader.proxy_to, ProxySocket):
+                        dead_sockets.add(reader.proxy_to)
+                        data_memory_usage -= reader.proxy_to.memory_usage()
                 else:
                     if reader.proxy_to is not None:
-                        if reader.proxy_to.tcp:
+                        if isinstance(reader.proxy_to, ProxySocket):
                             reader.proxy_to.write_cache.append(data)
                         else:
                             reader.sendto(data, (reader.proxy_to.host, reader.proxy_to.port))
@@ -233,15 +245,12 @@ def __run_proxy_loop(servers: List[ProxySocket]) -> None:
                         write_bytes = write_bytes[sent_count:]
                         writer.write_cache.appendleft(write_bytes)
                     data_memory_usage -= sent_count
-                except ConnectionError:
+                except (BlockingIOError, OSError, ConnectionError):
                     dead_sockets.add(writer)
                     data_memory_usage -= writer.memory_usage()
-                    try:
-                        writer.proxy_to.close()
-                    except OSError:
-                        pass
-                    dead_sockets.add(writer.proxy_to)
-                    data_memory_usage -= writer.proxy_to.memory_usage()
+                    if isinstance(writer.proxy_to, ProxySocket):
+                        dead_sockets.add(writer.proxy_to)
+                        data_memory_usage -= writer.proxy_to.memory_usage()
 
         for dead in dead_sockets:
             dead.read_cache.clear()
