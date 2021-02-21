@@ -11,7 +11,7 @@ from threading import Thread, Lock
 from typing import List, Tuple, Set, Optional, Union, Dict
 
 CHUNK_SIZE_B = 4096  # B
-MAX_MEMORY_B = 16*(1024**2)  # 16MiB
+MAX_MEMORY_B = 16 * (1024 ** 2)  # 16MiB
 SOCKET_IDLE_TIMEOUT = 120  # s, 0 to disabled
 SOCKET_IDLE_TCP_TIMEOUT_ENABLED = False
 
@@ -142,11 +142,19 @@ def __run_proxy_loop(servers: List[ProxySocket]) -> None:
         logging.debug(f'[MEM] {memory_usage // 1024} / {MAX_MEMORY_B // 1024} kiB used')
         possible_writes = list(filter(lambda x: x.write_cache, all_writers))
         logging.debug(f'[LOOP] possible readers {len(possible_readers)}, writers {len(possible_writes)}')
-        readers, writers, err = select(possible_readers, possible_writes,
-                                       list(set(possible_writes + possible_readers))
-                                       )  # type: List[ProxySocket], List[ProxySocket], List[ProxySocket]
-        logging.debug(f'[LOOP] selected readers {len(readers)}, writers {len(writers)}, in error {len(err)}')
-        dead_sockets.update(err)
+        try:
+            readers, writers, err = select(possible_readers, possible_writes,
+                                           list(set(possible_writes + possible_readers))
+                                           )  # type: List[ProxySocket], List[ProxySocket], List[ProxySocket]
+            logging.debug(f'[LOOP] selected readers {len(readers)}, writers {len(writers)}, in error {len(err)}')
+            dead_sockets.update(err)
+        except ValueError:
+            readers = writers = []
+            logging.debug('[LOOP] invalid socket found, removing')
+            for s in filter(lambda x: isinstance(x, ProxySocket) and x.fileno() < 0, all_readers):  # type: ProxySocket
+                dead_sockets.add(s)
+                if isinstance(s.proxy_to, ProxySocket):
+                    dead_sockets.add(s.proxy_to)
 
         for reader in readers:
             if reader in dead_sockets:
@@ -273,7 +281,6 @@ def __run_proxy_loop(servers: List[ProxySocket]) -> None:
 
 
 def main() -> int:
-    logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser(description='Runs a proxy from point A to point B')
     parser.add_argument('local_ip', metavar='localIP', type=str, help='an IP address to bind')
     parser.add_argument('local_port', metavar='localPort', type=int, help='a port to bind')
@@ -283,6 +290,8 @@ def main() -> int:
     parser.add_argument('--group', metavar='group', type=str, help='change guid to user', default='')
     parser.add_argument('--udp', dest='udp', action='store_const', const=True, default=False,
                         help='use UDP instead of TCP')
+    parser.add_argument('--debug', dest='debug', action='store_const', const=True, default=False,
+                        help='be more verbose')
     args = parser.parse_args()
 
     uid: Optional[int] = None
@@ -300,6 +309,8 @@ def main() -> int:
         except ModuleNotFoundError:
             print("Cannot determine user's UID / GUID")
             return 1
+
+    logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO)
 
     run_proxy([(
         PROXY_INFO(host=args.local_ip, port=args.local_port, tcp=not args.udp),
