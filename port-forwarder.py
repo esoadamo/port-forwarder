@@ -43,22 +43,31 @@ class ProxySocket(socket):
         return sum(map(lambda x: len(x), self.read_cache)) + sum(map(lambda x: len(x), self.write_cache))
 
 
-def create_socket_server(info: PROXY_INFO) -> ProxySocket:
+def create_socket_server(info: PROXY_INFO, wait_for_port = False) -> ProxySocket:
     s = ProxySocket(AF_INET, SOCK_STREAM if info.tcp else SOCK_DGRAM)
     s.is_server = True
     s.info = info
     s.setblocking(False)
-    s.bind((info.host, info.port))
+    while True:
+        try:
+            s.bind((info.host, info.port))
+            break
+        except OSError:
+            if wait_for_port:
+                logging.info(f'[SERV] {info}\'s port is not ready to be taken, retrying in 5 seconds')
+                time.sleep(5)
+            else:
+                raise
     if info.tcp:
         s.listen(10)
     return s
 
 
-def create_proxy_servers(pairs: List[PROXY_PAIR]) -> List[ProxySocket]:
+def create_proxy_servers(pairs: List[PROXY_PAIR], wait_for_ports=False) -> List[ProxySocket]:
     servers: List[ProxySocket] = []
 
     for proxy_from, proxy_to in pairs:
-        server = create_socket_server(proxy_from)
+        server = create_socket_server(proxy_from, wait_for_ports)
         server.proxy_to = proxy_to
         servers.append(server)
     return servers
@@ -72,8 +81,11 @@ def create_client_connection(source: Union[ProxySocket, PROXY_INFO], target: PRO
     return s
 
 
-def run_proxy(pairs: List[PROXY_PAIR], uid: Optional[int] = None, guid: Optional[int] = None) -> None:
-    servers = create_proxy_servers(pairs)
+def run_proxy(pairs: List[PROXY_PAIR],
+              uid: Optional[int] = None,
+              guid: Optional[int] = None,
+              wait_for_port=False) -> None:
+    servers = create_proxy_servers(pairs, wait_for_port)
     if guid is not None or uid is not None:
         from os import setuid, setgid
         setgid(guid)
@@ -296,6 +308,8 @@ def main() -> int:
                         help='use UDP instead of TCP')
     parser.add_argument('--debug', dest='debug', action='store_const', const=True, default=False,
                         help='be more verbose')
+    parser.add_argument('--wait-for-port', dest='portWait', action='store_const', const=True, default=False,
+                        help='be more verbose')
     args = parser.parse_args()
 
     uid: Optional[int] = None
@@ -319,7 +333,7 @@ def main() -> int:
     run_proxy([(
         PROXY_INFO(host=args.local_ip, port=args.local_port, tcp=not args.udp),
         PROXY_INFO(host=args.remote_ip, port=args.remote_port, tcp=not args.udp)
-    )], uid, guid)
+    )], uid=uid, guid=guid, wait_for_port=args.portWait)
     return 0
 
 
