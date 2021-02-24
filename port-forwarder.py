@@ -309,7 +309,7 @@ def main() -> int:
     parser.add_argument('--debug', dest='debug', action='store_const', const=True, default=False,
                         help='be more verbose')
     parser.add_argument('--wait-for-port', dest='portWait', action='store_const', const=True, default=False,
-                        help='be more verbose')
+                        help='if the port is taken now, wait until it becomes available')
     args = parser.parse_args()
 
     uid: Optional[int] = None
