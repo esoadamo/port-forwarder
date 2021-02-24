@@ -43,7 +43,7 @@ class ProxySocket(socket):
         return sum(map(lambda x: len(x), self.read_cache)) + sum(map(lambda x: len(x), self.write_cache))
 
 
-def create_socket_server(info: PROXY_INFO, wait_for_port = False) -> ProxySocket:
+def create_socket_server(info: PROXY_INFO, wait_for_port=False) -> ProxySocket:
     s = ProxySocket(AF_INET, SOCK_STREAM if info.tcp else SOCK_DGRAM)
     s.is_server = True
     s.info = info
