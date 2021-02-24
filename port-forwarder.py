@@ -216,6 +216,7 @@ def __run_proxy_loop(servers: List[ProxySocket]) -> None:
                     try:
                         soc.sendto(data, (target.host, target.port))
                     except (BlockingIOError, OSError, ConnectionError):
+                        logging.debug(f'[KILL] UDP send failed {reader.fileno()}')
                         dead_sockets.add(soc)
             else:
                 reader.last_used = time.time()
@@ -225,6 +226,7 @@ def __run_proxy_loop(servers: List[ProxySocket]) -> None:
                 except (BlockingIOError, OSError, ConnectionError):
                     data = bytes(0)
                 if not data:
+                    logging.debug(f'[KILL] no data read or error from {reader.fileno()}')
                     dead_sockets.add(reader)
                     data_memory_usage -= reader.memory_usage()
                     if isinstance(reader.proxy_to, ProxySocket):
@@ -257,6 +259,7 @@ def __run_proxy_loop(servers: List[ProxySocket]) -> None:
                         writer.write_cache.appendleft(write_bytes)
                     data_memory_usage -= sent_count
                 except (BlockingIOError, OSError, ConnectionError):
+                    logging.debug(f'[KILL] write error for {writer.fileno()}')
                     dead_sockets.add(writer)
                     data_memory_usage -= writer.memory_usage()
                     if isinstance(writer.proxy_to, ProxySocket):
@@ -264,6 +267,7 @@ def __run_proxy_loop(servers: List[ProxySocket]) -> None:
                         data_memory_usage -= writer.proxy_to.memory_usage()
 
         for dead in dead_sockets:
+            logging.debug(f"[KILL] killing {dead.fileno()}")
             dead.read_cache.clear()
             dead.write_cache.clear()
             try:
