@@ -84,7 +84,8 @@ def create_client_connection(source: Union[ProxySocket, PROXY_INFO], target: PRO
 def run_proxy(pairs: List[PROXY_PAIR],
               uid: Optional[int] = None,
               guid: Optional[int] = None,
-              wait_for_port=False) -> None:
+              wait_for_port=False,
+              empty_data_ok=False) -> None:
     servers = create_proxy_servers(pairs, wait_for_port)
     if guid is not None or uid is not None:
         from os import setuid, setgid
@@ -92,13 +93,13 @@ def run_proxy(pairs: List[PROXY_PAIR],
         setuid(uid)
 
     try:
-        __run_proxy_loop(servers)
+        __run_proxy_loop(servers, empty_data_ok)
     finally:
         print('stopping servers')
         [s.close() for s in servers]
 
 
-def __run_proxy_loop(servers: List[ProxySocket]) -> None:
+def __run_proxy_loop(servers: List[ProxySocket], empty_data_ok=False) -> None:
     os_windows = platform.system() == 'Windows'
     # this server will be notified when a new connection is established in order to unblock select
     if os_windows:
@@ -235,10 +236,15 @@ def __run_proxy_loop(servers: List[ProxySocket]) -> None:
                 try:
                     data = reader.recv(CHUNK_SIZE_B)
                     data_memory_usage += len(data)
+                    in_error = False
                 except (BlockingIOError, OSError, ConnectionError):
                     data = bytes(0)
-                if not data:
-                    logging.debug(f'[KILL] no data read or error from {reader.fileno()}')
+                    in_error = True
+                if in_error or (not empty_data_ok and not data):
+                    if in_error:
+                        logging.debug(f'[KILL] error from {reader.fileno()}')
+                    else:
+                        logging.debug(f'[KILL] no data read from {reader.fileno()}')
                     dead_sockets.add(reader)
                     data_memory_usage -= reader.memory_usage()
                     if isinstance(reader.proxy_to, ProxySocket):
@@ -310,6 +316,8 @@ def main() -> int:
                         help='be more verbose')
     parser.add_argument('--wait-for-port', dest='portWait', action='store_const', const=True, default=False,
                         help='if the port is taken now, wait until it becomes available')
+    parser.add_argument('--empty-ok', dest='emptyDataOK', action='store_const', const=True, default=False,
+                        help='take empty data as a proof of alive socket')
     args = parser.parse_args()
 
     uid: Optional[int] = None
@@ -333,7 +341,7 @@ def main() -> int:
     run_proxy([(
         PROXY_INFO(host=args.local_ip, port=args.local_port, tcp=not args.udp),
         PROXY_INFO(host=args.remote_ip, port=args.remote_port, tcp=not args.udp)
-    )], uid=uid, guid=guid, wait_for_port=args.portWait)
+    )], uid=uid, guid=guid, wait_for_port=args.portWait, empty_data_ok=args.emptyDataOK)
     return 0
 
 
