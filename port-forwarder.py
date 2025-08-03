@@ -13,7 +13,7 @@ from typing import List, Tuple, Set, Optional, Union, Dict
 CHUNK_SIZE_B = 4096  # B
 MAX_MEMORY_B = 16 * (1024 ** 2)  # 16MiB
 SOCKET_IDLE_TIMEOUT = 120  # s, 0 to disabled
-SOCKET_IDLE_TCP_TIMEOUT_ENABLED = False
+SOCKET_IDLE_TCP_TIMEOUT_ENABLED = True
 
 PROXY_INFO = namedtuple('ProxyInfo', ['host', 'port', 'tcp'])
 PROXY_PAIR = Tuple[PROXY_INFO, PROXY_INFO]  # from, to
@@ -316,7 +316,7 @@ def main() -> int:
                         help='be more verbose')
     parser.add_argument('--wait-for-port', dest='portWait', action='store_const', const=True, default=False,
                         help='if the port is taken now, wait until it becomes available')
-    parser.add_argument('--empty-ok', dest='emptyDataOK', action='store_const', const=True, default=False,
+    parser.add_argument('--empty-ok', dest='emptyDataOK', action='store_const', const=True, default=True,
                         help='take empty data as a proof of alive socket')
     args = parser.parse_args()
 
